@@ -3,68 +3,9 @@
 #include <algorithm>
 #include <iostream>
 #include <limits>
-#include <sstream>
-
-#include <boost/algorithm/string.hpp>
 
 namespace onmt
 {
-
-  static const std::string features_separator = "￨";
-  static const std::string words_separator = " ";
-
-  static void tokenize(const std::string& text,
-                       std::vector<std::string>& tokens,
-                       std::vector<std::vector<std::string> >& features)
-  {
-    std::vector<std::string> chunks;
-    boost::split(chunks, text, boost::is_any_of(words_separator));
-
-    for (const auto& chunk: chunks)
-    {
-      size_t i = 0;
-      int sep_offset = -features_separator.length();
-
-      do {
-        int start = sep_offset + features_separator.length();
-        sep_offset = chunk.find(features_separator, start);
-        std::string sub = chunk.substr(start, sep_offset);
-
-        if (i == 0)
-          tokens.push_back(sub);
-        else
-        {
-          if (features.size() < i)
-            features.emplace_back(1, sub);
-          else
-            features[i-1].push_back(sub);
-        }
-
-        i++;
-      } while (static_cast<size_t>(sep_offset) != std::string::npos);
-    }
-  }
-
-  static std::string detokenize(const std::vector<std::string>& tokens,
-                                const std::vector<std::vector<std::string> >& features = {})
-  {
-    std::ostringstream oss;
-
-    for (size_t i = 0; i < tokens.size(); ++i)
-    {
-      if (i > 0)
-        oss << words_separator;
-      oss << tokens[i];
-
-      if (!features.empty())
-      {
-        for (size_t j = 0; j < features.size(); ++j)
-          oss << features_separator << features[j][i];
-      }
-    }
-
-    return oss.str();
-  }
 
   static std::vector<std::string> ids_to_words(const Dictionary& dict, const std::vector<size_t>& ids)
   {
@@ -200,15 +141,20 @@ namespace onmt
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
   Translator<MatFwd, MatIn, MatEmb, ModelT>::Translator(const std::string& model,
                                                         const std::string& phrase_table,
+                                                        const std::string& vocab_mapping,
                                                         bool replace_unk,
                                                         size_t max_sent_length,
-                                                        size_t beam_size)
-    : _model(model)
+                                                        size_t beam_size,
+                                                        bool cuda,
+                                                        bool profiling)
+    : _profiler(profiling)
+    , _model(model, _profiler, cuda)
     , _src_dict(_model.get_src_dict())
     , _tgt_dict(_model.get_tgt_dict())
     , _src_feat_dicts(_model.get_src_feat_dicts())
     , _tgt_feat_dicts(_model.get_tgt_feat_dicts())
     , _phrase_table(phrase_table)
+    , _subdict(vocab_mapping, _tgt_dict)
     , _replace_unk(replace_unk)
     , _max_sent_length(max_sent_length)
     , _beam_size(beam_size)
@@ -220,15 +166,44 @@ namespace onmt
   }
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
-  std::string Translator<MatFwd, MatIn, MatEmb, ModelT>::translate(const std::string& text)
+  std::string Translator<MatFwd, MatIn, MatEmb, ModelT>::translate(const std::string& text,
+                                                                   ITokenizer& tokenizer)
   {
     std::vector<std::string> src_tokens;
     std::vector<std::vector<std::string> > src_features;
-    tokenize(text, src_tokens, src_features);
+
+    tokenizer.tokenize(text, src_tokens, src_features);
 
     TranslationResult res = translate(src_tokens, src_features);
 
-    return detokenize(res.get_words(), res.get_features());
+    return tokenizer.detokenize(res.get_words(), res.get_features());
+  }
+
+  class tdict
+  {
+  public:
+    tdict(int n)
+      : _ndict(n)
+    {}
+    int _ndict;
+    std::vector<size_t> subvocab;
+  };
+
+  template <typename MatFwd, typename MatIn, typename, typename ModelT>
+  void* reduce_vocabulary(nn::Module<MatFwd>* M, void* t)
+  {
+    if (M->get_name() == "nn.Linear")
+    {
+      nn::Linear<MatFwd, MatIn, ModelT>* mL = (nn::Linear<MatFwd, MatIn, ModelT>*)M;
+      tdict* data = (tdict*)t;
+      if (mL->get_weight().rows() == data->_ndict)
+        SubDict::reduce_linearweight(mL->get_weight(),
+                                     mL->get_bias(),
+                                     mL->get_rweight(),
+                                     mL->get_rbias(),
+                                     data->subvocab);
+    }
+    return 0;
   }
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
@@ -244,7 +219,8 @@ namespace onmt
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
   std::vector<std::string>
-  Translator<MatFwd, MatIn, MatEmb, ModelT>::translate_batch(const std::vector<std::string>& texts)
+  Translator<MatFwd, MatIn, MatEmb, ModelT>::translate_batch(const std::vector<std::string>& texts,
+                                                             ITokenizer& tokenizer)
   {
     std::vector<std::vector<std::string> > batch_tokens;
     std::vector<std::vector<std::vector<std::string> > > batch_features;
@@ -253,7 +229,7 @@ namespace onmt
     {
       std::vector<std::string> tokens;
       std::vector<std::vector<std::string> > features;
-      tokenize(text, tokens, features);
+      tokenizer.tokenize(text, tokens, features);
       batch_tokens.push_back(tokens);
       batch_features.push_back(features);
     }
@@ -266,9 +242,9 @@ namespace onmt
     for (size_t i = 0; i < res.count(); ++i)
     {
       if (res.has_features())
-        tgt_texts.push_back(detokenize(res.get_words(i), res.get_features(i)));
+        tgt_texts.push_back(tokenizer.detokenize(res.get_words(i), res.get_features(i)));
       else
-        tgt_texts.push_back(detokenize(res.get_words(i)));
+        tgt_texts.push_back(tokenizer.detokenize(res.get_words(i), {}));
     }
 
     return tgt_texts;
@@ -286,11 +262,30 @@ namespace onmt
     std::vector<std::vector<size_t> > batch_ids;
     std::vector<std::vector<std::vector<size_t> > > batch_feat_ids;
 
+    tdict data(_tgt_dict.get_size());
+    if (!_subdict.empty())
+    {
+      std::set<size_t> e;
+      for (const auto& it: batch_tokens)
+        _subdict.extract(it, e);
+      /* convert into vector */
+      for (auto idx: e)
+        data.subvocab.push_back(idx);
+      /* modify generator weights and bias accordingly */
+      _generator->apply(reduce_vocabulary<MatFwd, MatIn, MatEmb, ModelT>, &data);
+    }
+
     for (size_t b = 0; b < batch_size; ++b)
     {
       batch_ids.push_back(words_to_ids(_src_dict, batch_tokens[b]));
 
-      if (_src_feat_dicts.size() > 0)
+      if (_src_feat_dicts.size() != batch_features[b].size())
+        throw std::runtime_error("expected "
+                                 + std::to_string(_src_feat_dicts.size())
+                                 + " word feature(s), got "
+                                 + std::to_string(batch_features[b].size())
+                                 + " instead");
+      else if (_src_feat_dicts.size() > 0)
       {
         batch_feat_ids.emplace_back();
         for (size_t j = 0; j < _src_feat_dicts.size(); ++j)
@@ -312,7 +307,7 @@ namespace onmt
     MatFwd context;
 
     encode(batch_tokens, batch_ids, batch_feat_ids, rnn_state_enc, context);
-    return decode(batch_tokens, source_l, rnn_state_enc, context);
+    return decode(batch_tokens, source_l, rnn_state_enc, context, data.subvocab);
   }
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
@@ -331,18 +326,14 @@ namespace onmt
     for (size_t l = 0; l < rnn_state_enc.size(); ++l)
       input.push_back(rnn_state_enc[l]);
 
-    // Words
-    input.emplace_back(batch_size, 1);
+    // Words and features
+    input.emplace_back(batch_size, 1 + _src_feat_dicts.size());
     for (size_t b = 0; b < batch_size; ++b)
+    {
       input.back()(b, 0) = batch_ids[b][t];
 
-    // Features
-    for (size_t j = 0; j < _src_feat_dicts.size(); ++j)
-    {
-      input.emplace_back(batch_size, _src_feat_dicts[j].get_size());
-      input.back().setZero();
-      for (size_t b = 0; b < batch_size; ++b)
-        input.back()(b, batch_feat_ids[b][j][t]) = 1;
+      for (size_t j = 0; j < _src_feat_dicts.size(); ++j)
+        input.back()(b, j + 1) = batch_feat_ids[b][j][t];
     }
 
     return input;
@@ -362,7 +353,7 @@ namespace onmt
 
     size_t num_layers = _model.template get_option_value<size_t>("layers");
     size_t rnn_size = _model.template get_option_value<size_t>("rnn_size");
-    bool brnn = _model.get_option_flag("brnn");
+    bool brnn = _model.get_option_string("encoder_type") == "brnn" || _model.get_option_flag("brnn");
     const std::string& brnn_merge = _model.get_option_string("brnn_merge");
 
     if (brnn && brnn_merge == "concat")
@@ -460,7 +451,8 @@ namespace onmt
     const std::vector<std::vector<std::string> >& batch_tokens,
     size_t source_l,
     std::vector<MatFwd>& rnn_state_enc,
-    MatFwd& context)
+    MatFwd& context,
+    const std::vector<size_t>& subvocab)
   {
     size_t batch_size = batch_tokens.size();
 
@@ -508,11 +500,12 @@ namespace onmt
       if (_tgt_feat_dicts.size() > 0)
       {
         next_features.emplace_back();
+        next_features.back().emplace_back();
         for (size_t j = 0; j < _tgt_feat_dicts.size(); ++j)
         {
           std::vector<size_t> in_feat1(_beam_size, Dictionary::pad_id);
-          in_feat1[0] = Dictionary::unk_id;
-          next_features.back().emplace_back(1, in_feat1);
+          in_feat1[0] = Dictionary::eos_id;
+          next_features.back().back().push_back(in_feat1);
         }
       }
 
@@ -541,31 +534,31 @@ namespace onmt
     {
       // Prepare decoder input at timestep i.
       std::vector<MatFwd> input;
+
+      // States.
       for (size_t l = 0; l < rnn_state_dec.size(); ++l)
         input.push_back(rnn_state_dec[l]);
-      input.emplace_back(_beam_size * remaining_sents, 1);
+
+      // Words and features.
+      input.emplace_back(_beam_size * remaining_sents, 1 + _tgt_feat_dicts.size());
       for (size_t b = 0; b < batch_size; ++b)
       {
         if (done[b])
           continue;
 
         int idx = batch_idx[b];
+
         for (size_t k = 0; k < _beam_size; ++k)
-          input.back()(get_offset(idx, k, remaining_sents), 0) = next_ys[b][i-1][k];
-      }
-      for (size_t j = 0; j < _tgt_feat_dicts.size(); ++j)
-      {
-        input.emplace_back(_beam_size * remaining_sents, _tgt_feat_dicts[j].get_size());
-        input.back().setZero();
-        for (size_t b = 0; b < batch_size; ++b)
         {
-          if (done[b])
-            continue;
-          int idx = batch_idx[b];
-          for (size_t k = 0; k < _beam_size; ++k)
-            input.back()(get_offset(idx, k, remaining_sents), next_features[b][i-1][j][k]) = 1;
+          input.back()(get_offset(idx, k, remaining_sents), 0) = next_ys[b][i-1][k];
+
+          for (size_t j = 0; j < _tgt_feat_dicts.size(); ++j)
+            input.back()(get_offset(idx, k, remaining_sents), j + 1) = next_features[b][i-1][j][k];
         }
+
       }
+
+      // Context and input feed.
       input.push_back(context_dec);
       if (with_input_feeding)
         input.push_back(input_feed);
@@ -574,6 +567,12 @@ namespace onmt
 
       // Mask attention softmax output depending on input sentence size.
       softmax_attn->post_process_fun() = [&] (std::vector<MatFwd>& out) {
+        if (batch_size == 1)
+        {
+          attn_softmax_out = out[0];
+          return;
+        }
+
         MatFwd& soft_out = out[0];
 
         for (size_t b = 0; b < batch_size; ++b)
@@ -615,6 +614,8 @@ namespace onmt
 
       size_t new_remaining_sents = remaining_sents;
 
+      _profiler.start();
+
       // Update beam path for all non finished sentences.
       for (size_t b = 0; b < batch_size; ++b)
       {
@@ -635,9 +636,9 @@ namespace onmt
         {
           float best_score = -std::numeric_limits<float>::max();
           size_t best_score_id = 0;
-          size_t from_beam_size = 0;
+          size_t from_beam = 0;
 
-          if (i == 1) // All outputs are the same on the first decoding step.
+          if (i == 1 || _beam_size == 1) // All outputs are the same on the first decoding step.
           {
             best_score_id = 0;
             best_score = out.row(idx).maxCoeff(&best_score_id);
@@ -665,22 +666,27 @@ namespace onmt
               {
                 best_score = best_score_per_beam_size[k];
                 best_score_id = best_score_id_per_beam_size[k];
-                from_beam_size = k;
+                from_beam = k;
               }
             }
           }
 
-          prev_ks[b][i][k] = from_beam_size;
-          next_ys[b][i][k] = best_score_id;
+          prev_ks[b][i][k] = from_beam;
+          if (subvocab.size())
+            /* restore the actual index */
+            next_ys[b][i][k] = subvocab[best_score_id];
+          else
+            next_ys[b][i][k] = best_score_id;
+
           scores[b][i][k] = best_score;
 
-          size_t from_beam_size_offset = get_offset(idx, from_beam_size, remaining_sents);
+          size_t from_beam_offset = get_offset(idx, from_beam, remaining_sents);
 
           // Store the attention.
-          all_attention[b][i].row(k) = attn_softmax_out.row(from_beam_size_offset);
+          all_attention[b][i].row(k) = attn_softmax_out.row(from_beam_offset);
 
           // Override the best to ignore it for the next beam.
-          out.row(from_beam_size_offset)(best_score_id) = -std::numeric_limits<float>::max();
+          out.row(from_beam_offset)(best_score_id) = -std::numeric_limits<float>::max();
         }
 
         if (_tgt_feat_dicts.size() > 0)
@@ -724,6 +730,8 @@ namespace onmt
           }
         }
       }
+
+      _profiler.stop("Beam search");
 
       if (new_remaining_sents > 0)
       {
@@ -796,6 +804,9 @@ namespace onmt
         start_k = 0;
         len = end_finished_at[b] + 1;
       }
+
+      if (len == 1)
+        len = i;
 
       std::vector<size_t> tgt_ids;
       std::vector<std::vector<size_t> > tgt_feat_ids;

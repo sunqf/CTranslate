@@ -3,7 +3,7 @@
 #include <unordered_map>
 
 #include "onmt/Dictionary.h"
-#include "onmt/nn/Module.h"
+#include "onmt/nn/ModuleFactory.h"
 #include "onmt/th/Env.h"
 
 namespace onmt
@@ -13,8 +13,7 @@ namespace onmt
   class Model
   {
   public:
-    Model(const std::string& filename);
-    ~Model();
+    Model(const std::string& filename, Profiler& profiler, bool cuda);
 
     nn::Module<MatFwd>* get_encoder_module(size_t index);
     nn::Module<MatFwd>* get_decoder_module(size_t index);
@@ -30,6 +29,8 @@ namespace onmt
     template <typename T = double>
     T get_option_value(const std::string& key, T default_value = 0) const;
 
+    void enable_profiling();
+
   private:
     nn::Module<MatFwd>* get_module(size_t index, std::vector<nn::Module<MatFwd>*>& modules);
 
@@ -40,6 +41,7 @@ namespace onmt
     void load_networks(th::Table* obj);
 
     th::Env _env;
+    nn::ModuleFactory<MatFwd, MatIn, MatEmb, ModelT> _module_factory;
 
     std::vector<nn::Module<MatFwd>*> _encoder_modules;
     std::vector<nn::Module<MatFwd>*> _decoder_modules;

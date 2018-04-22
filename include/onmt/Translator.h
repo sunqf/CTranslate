@@ -6,6 +6,7 @@
 #include "Dictionary.h"
 #include "PhraseTable.h"
 #include "ITranslator.h"
+#include "SubDict.h"
 
 namespace onmt
 {
@@ -19,8 +20,8 @@ namespace onmt
   public:
     friend class TranslatorFactory;
 
-    std::string translate(const std::string& text) override;
-    std::vector<std::string> translate_batch(const std::vector<std::string>& texts) override;
+    std::string translate(const std::string& text, ITokenizer& tokenizer) override;
+    std::vector<std::string> translate_batch(const std::vector<std::string>& texts, ITokenizer& tokenizer) override;
 
     TranslationResult
     translate(const std::vector<std::string>& tokens,
@@ -33,16 +34,21 @@ namespace onmt
   protected:
     Translator(const std::string& model,
                const std::string& phrase_table,
+               const std::string& vocab_mapping,
                bool replace_unk,
                size_t max_sent_length,
-               size_t beam_size);
+               size_t beam_size,
+               bool cuda,
+               bool profiling);
 
+    Profiler _profiler;
     Model<MatFwd, MatIn, MatEmb, ModelT> _model;
     const Dictionary& _src_dict;
     const Dictionary& _tgt_dict;
     const std::vector<Dictionary>& _src_feat_dicts;
     const std::vector<Dictionary>& _tgt_feat_dicts;
     PhraseTable _phrase_table;
+    SubDict _subdict;
     bool _replace_unk;
     size_t _max_sent_length;
     size_t _beam_size;
@@ -64,7 +70,8 @@ namespace onmt
     decode(const std::vector<std::vector<std::string> >& batch_tokens,
            size_t source_l,
            std::vector<MatFwd>& rnn_state_enc,
-           MatFwd& context);
+           MatFwd& context,
+           const std::vector<size_t>& subvocab);
 
   private:
     nn::Module<MatFwd>* _encoder;
@@ -79,12 +86,6 @@ namespace onmt
                                        Eigen::Map<const Eigen::RowMajorMat<T> >,
                                        Eigen::Map<const Eigen::RowMajorMat<T> >,
                                        T>;
-
-  template <typename T>
-  using SparseTranslator = Translator<Eigen::MatrixBatch<T>,
-                                      const Eigen::RowMajorSparseMat<T>,
-                                      Eigen::Map<const Eigen::RowMajorMat<T> >,
-                                      T>;
 
 }
 

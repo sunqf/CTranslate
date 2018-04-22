@@ -9,18 +9,19 @@ namespace onmt
   {
 
     template <typename MatFwd>
-    class Sum: public Module<MatFwd>
+    class Squeeze: public Module<MatFwd>
     {
     public:
-      Sum(th::Table* data)
-        : Module<MatFwd>("nn.Sum")
+      Squeeze(th::Table* data)
+        : Module<MatFwd>("nn.Squeeze")
         , _dimension(get_number(data, "dimension"))
       {
       }
 
       void forward_impl(const MatFwd& input) override
       {
-        this->_output = input.sum(_dimension);
+        this->_output = input;
+        this->_output.squeeze(_dimension);
       }
 
     private:

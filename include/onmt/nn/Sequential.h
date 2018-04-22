@@ -11,12 +11,28 @@ namespace onmt
     class Sequential: public Container<MatFwd, MatIn, MatEmb, ModelT>
     {
     public:
-      Sequential(th::Table* data);
+      Sequential(th::Table* data, ModuleFactory<MatFwd, MatIn, MatEmb, ModelT>& factory)
+        : Container<MatFwd, MatIn, MatEmb, ModelT>("nn.Sequential", data, factory)
+      {
+      }
 
-      virtual std::vector<MatFwd> forward(std::vector<MatFwd>& input) const override;
+      void forward_impl(const std::vector<MatFwd>& inputs) override
+      {
+        if (this->_sequence.empty())
+        {
+          this->_outputs = inputs;
+          return;
+        }
+
+        auto it = this->_sequence.begin();
+        this->_outputs = (*it)->forward(inputs);
+
+        for (it++; it != this->_sequence.end(); it++)
+        {
+          this->_outputs = (*it)->forward(this->_outputs);
+        }
+      }
     };
 
   }
 }
-
-#include "onmt/nn/Sequential.hxx"

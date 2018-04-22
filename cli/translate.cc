@@ -20,12 +20,15 @@ int main(int argc, char* argv[])
     ("src", po::value<std::string>(), "path to the file to translate (read from the standard input if not set)")
     ("tgt", po::value<std::string>(), "path to the output file (write to the standard output if not set")
     ("phrase_table", po::value<std::string>()->default_value(""), "path to the phrase table")
+    ("vocab_mapping", po::value<std::string>()->default_value(""), "path to a vocabulary mapping table")
     ("replace_unk", po::bool_switch()->default_value(false), "replace unknown tokens by source tokens with the highest attention")
     ("batch_size", po::value<size_t>()->default_value(30), "batch size")
     ("beam_size", po::value<size_t>()->default_value(5), "beam size")
     ("max_sent_length", po::value<size_t>()->default_value(250), "maximum sentence length to produce")
     ("time", po::bool_switch()->default_value(false), "output average translation time")
+    ("profiler", po::bool_switch()->default_value(false), "output per module computation time")
     ("threads", po::value<size_t>()->default_value(0), "number of threads to use (set to 0 to use the number defined by OpenMP)")
+    ("cuda", po::bool_switch()->default_value(false), "use cuda when available")
     ;
 
   po::variables_map vm;
@@ -49,9 +52,12 @@ int main(int argc, char* argv[])
 
   auto translator = onmt::TranslatorFactory::build(vm["model"].as<std::string>(),
                                                    vm["phrase_table"].as<std::string>(),
+                                                   vm["vocab_mapping"].as<std::string>(),
                                                    vm["replace_unk"].as<bool>(),
                                                    vm["max_sent_length"].as<size_t>(),
-                                                   vm["beam_size"].as<size_t>());
+                                                   vm["beam_size"].as<size_t>(),
+                                                   vm["cuda"].as<bool>(),
+                                                   vm["profiler"].as<bool>());
 
   std::unique_ptr<BatchReader> reader;
   if (vm.count("src"))

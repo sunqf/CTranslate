@@ -2,13 +2,12 @@
 
 #include "onmt/th/Obj.h"
 
-#include "onmt/nn/ModuleFactory.h"
-
 namespace onmt
 {
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
-  Model<MatFwd, MatIn, MatEmb, ModelT>::Model(const std::string& filename)
+  Model<MatFwd, MatIn, MatEmb, ModelT>::Model(const std::string& filename, Profiler& profiler, bool cuda)
+    : _module_factory(profiler, cuda)
   {
     THFile* tf = THDiskFile_new(filename.c_str(), "r", 0);
     THFile_binary(tf);
@@ -87,25 +86,29 @@ namespace onmt
       th::Class* mod = dynamic_cast<th::Class*>(module);
 
       if (mod)
-        modules.push_back(nn::ModuleFactory<MatFwd, MatIn, MatEmb, ModelT>::build(mod));
+        modules.push_back(_module_factory.build(mod));
       else if (dynamic_cast<th::Table*>(module))
         load_networks(dynamic_cast<th::Table*>(module), modules);
     }
   }
 
-  template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
-  void Model<MatFwd, MatIn, MatEmb, ModelT>::load_networks(th::Table* obj)
+  template <typename MF>
+  static void* mark_block(nn::Module<MF>* M, void* t)
   {
-    nn::ModuleFactory<MatFwd, MatIn, MatEmb, ModelT>::init();
-
-    load_networks(th::get_field<th::Table*>(obj, "encoder"), _encoder_modules);
-    load_networks(th::get_field<th::Table*>(obj, "decoder"), _decoder_modules);
+    M->set_block((const char*)t);
+    return 0;
   }
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>
-  Model<MatFwd, MatIn, MatEmb, ModelT>::~Model()
+  void Model<MatFwd, MatIn, MatEmb, ModelT>::load_networks(th::Table* obj)
   {
-    nn::ModuleFactory<MatFwd, MatIn, MatEmb, ModelT>::destroy();
+    load_networks(th::get_field<th::Table*>(obj, "encoder"), _encoder_modules);
+    _encoder_modules[0]->apply(mark_block<MatFwd>, (void*)"encoder_fwd");
+    if (_encoder_modules[1])
+      _encoder_modules[1]->apply(mark_block<MatFwd>, (void*)"encoder_bwd");
+    load_networks(th::get_field<th::Table*>(obj, "decoder"), _decoder_modules);
+    _decoder_modules[0]->apply(mark_block<MatFwd>, (void*)"decoder");
+    _decoder_modules[1]->apply(mark_block<MatFwd>, (void*)"generator");
   }
 
   template <typename MatFwd, typename MatIn, typename MatEmb, typename ModelT>

@@ -1,9 +1,11 @@
 #pragma once
 
-#include <unordered_map>
-
 #include "onmt/nn/Module.h"
 #include "onmt/th/Obj.h"
+
+#ifdef WITH_CUDA
+#  include "onmt/cuda/Utils.h"
+#endif
 
 namespace onmt
 {
@@ -14,14 +16,18 @@ namespace onmt
     class ModuleFactory
     {
     public:
-      static void init();
-      static void destroy();
+      ModuleFactory(Profiler& profiler, bool cuda);
+      ~ModuleFactory();
 
-      static Module<MatFwd>* build(th::Class* obj);
+      Module<MatFwd>* build(th::Class* obj);
 
     private:
-      static std::unordered_map<std::string, Module<MatFwd>*> _stateless_storage;
-      static std::vector<Module<MatFwd>*> _storage;
+      std::vector<Module<MatFwd>*> _storage;
+      Profiler& _profiler;
+      bool _cuda;
+#ifdef WITH_CUDA
+      cublasHandle_t _handle;
+#endif
     };
 
   }
